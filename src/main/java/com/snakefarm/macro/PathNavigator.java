@@ -94,9 +94,17 @@ public class PathNavigator {
         float targetYaw = (float) (MathHelper.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0f;
         float targetPitch = (float) -(MathHelper.atan2(dy, horizontalDist) * (180.0 / Math.PI));
 
-        float smoothFactor = 0.4f;
-        player.setYaw(lerpAngle(player.getYaw(), targetYaw, smoothFactor));
-        player.setPitch(lerpAngle(player.getPitch(), targetPitch, smoothFactor));
+        // Smooth human-like rotation with slight randomization
+        float smoothFactor = 0.12f + (float)(Math.random() * 0.04);
+        float newYaw = lerpAngle(player.getYaw(), targetYaw, smoothFactor);
+        float newPitch = lerpAngle(player.getPitch(), targetPitch, smoothFactor);
+
+        // Tiny mouse-like micro-jitter
+        newYaw += (float)(Math.random() * 0.2 - 0.1);
+        newPitch += (float)(Math.random() * 0.15 - 0.075);
+
+        player.setYaw(newYaw);
+        player.setPitch(newPitch);
     }
 
     private void moveTowards(MinecraftClient client, ClientPlayerEntity player, Vec3d target) {

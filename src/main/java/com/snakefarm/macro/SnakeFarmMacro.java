@@ -3,6 +3,7 @@ package com.snakefarm.macro;
 import com.snakefarm.SnakeFarmMod;
 import com.snakefarm.util.ChatUtils;
 import com.snakefarm.util.PosHelper;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.util.math.BlockPos;
@@ -13,11 +14,16 @@ import java.util.Optional;
 /**
  * Core state machine for the snake farming macro.
  *
- * Snakes are blocks on walls/floors:
- * - Head = Lapis Lazuli block (stun target)
- * - Body = Blue Stained Glass blocks (mine target, start from tail)
+ * Snake mechanics (from user + SkyHanni source):
+ * - Snakes are block chains: Lapis head + Blue Stained Glass body
+ * - Snakes have states: SPAWNING, ACTIVE, CALM, NOT_TOUCHING_AIR
+ * - To farm: right-click tail with slot 2 item to stun → switch to slot 1 → mine tail
+ * - Repeat stun→mine from tail to head until entire snake is consumed
  *
- * Flow: SCANNING -> PATHFINDING -> STUNNING -> MINING -> (repeat stun/mine) -> SCANNING
+ * Flow:
+ *   SCANNING → PATHFINDING → ROTATING_TO_TAIL → STUNNING → MINING →
+ *     (tail mined) → ROTATING_TO_TAIL → STUNNING → MINING → ...
+ *     (all blocks mined) → SCANNING
  */
 public class SnakeFarmMacro {
 
@@ -25,9 +31,11 @@ public class SnakeFarmMacro {
         IDLE("Idle"),
         SCANNING("Scanning for snakes..."),
         PATHFINDING("Walking to snake..."),
-        STUNNING("Stunning snake head..."),
-        MINING("Mining snake tail..."),
-        WAITING("Waiting after stun...");
+        ROTATING_TO_TAIL("Looking at tail..."),
+        STUNNING("Stunning snake..."),
+        SWITCHING_TO_MINE("Switching to pickaxe..."),
+        MINING("Mining tail block..."),
+        SWITCHING_TO_STUN("Switching to stun item...");
 
         public final String display;
         State(String display) { this.display = display; }
@@ -39,26 +47,36 @@ public class SnakeFarmMacro {
     private final PathNavigator navigator = new PathNavigator();
     private final PlayerController controller = new PlayerController();
 
-    // Current target snake
+    // Current target
     private SnakeDetector.Snake targetSnake = null;
-    private BlockPos targetMineBlock = null;
+    private BlockPos currentTail = null;
 
     // Timing
     private int tickCounter = 0;
     private int scanCooldown = 0;
-    private int waitTicks = 0;
+    private int stunTicks = 0;
+    private int switchTicks = 0;
+    private int mineTicks = 0;
+    private int rotateTicks = 0;
 
     // Stats
     private int snakesKilled = 0;
     private int blocksMined = 0;
 
-    // Config
-    private static final int SCAN_INTERVAL = 20;         // Scan every 1 second
-    private static final int STUN_DURATION = 6;           // Ticks to wait after stun before mining
-    private static final int MAX_MINE_TICKS = 100;        // Max ticks mining one block before re-stun
-    private static final double INTERACT_RANGE = 4.5;     // Block interaction range
+    // Config — hotbar slots (0-indexed)
+    private static final int MINE_SLOT = 0;     // Slot 1 = pickaxe
+    private static final int STUN_SLOT = 1;     // Slot 2 = stun item
 
-    private int mineTicks = 0;
+    // Timing config
+    private static final int SCAN_INTERVAL = 20;          // 1 second between scans
+    private static final int STUN_HOLD_TICKS = 10;        // ~0.5 seconds right-click hold
+    private static final int SLOT_SWITCH_DELAY = 3;        // Brief delay after switching slots
+    private static final int MAX_MINE_TICKS = 80;          // Re-stun if mining takes too long
+    private static final int MAX_ROTATE_TICKS = 30;        // Max ticks to rotate before forcing
+    private static final double INTERACT_RANGE = 4.5;
+
+    // Human-like timing randomization
+    private int stunHoldTarget = STUN_HOLD_TICKS;
 
     public void toggle() {
         running = !running;
@@ -72,215 +90,242 @@ public class SnakeFarmMacro {
         }
     }
 
-    public boolean isRunning() {
-        return running;
-    }
-
-    public State getState() {
-        return state;
-    }
+    public boolean isRunning() { return running; }
+    public State getState() { return state; }
 
     public void tick(MinecraftClient client) {
         if (!running || client.player == null || client.world == null) return;
-
         tickCounter++;
 
         switch (state) {
             case SCANNING -> tickScanning(client);
             case PATHFINDING -> tickPathfinding(client);
+            case ROTATING_TO_TAIL -> tickRotatingToTail(client);
             case STUNNING -> tickStunning(client);
+            case SWITCHING_TO_MINE -> tickSwitchingToMine(client);
             case MINING -> tickMining(client);
-            case WAITING -> tickWaiting(client);
+            case SWITCHING_TO_STUN -> tickSwitchingToStun(client);
             case IDLE -> { }
         }
     }
 
     // ========================
-    // State: SCANNING
+    // SCANNING
     // ========================
     private void tickScanning(MinecraftClient client) {
-        if (scanCooldown > 0) {
-            scanCooldown--;
-            return;
-        }
+        if (scanCooldown > 0) { scanCooldown--; return; }
 
         Optional<SnakeDetector.Snake> nearest = SnakeDetector.findNearestSnake(client);
-
         if (nearest.isPresent()) {
             targetSnake = nearest.get();
-            state = State.PATHFINDING;
-            navigator.setTarget(targetSnake.getCenterPos());
-            ChatUtils.sendActionBar("\u00a7a[SnakeFarm] Found snake! (" + targetSnake.length() + " blocks) Moving to it...");
-            SnakeFarmMod.LOGGER.info("[SnakeFarm] Snake found at {} with {} body segments",
-                    targetSnake.head, targetSnake.body.size());
+            currentTail = targetSnake.getTail();
+
+            // If already in range, skip pathfinding
+            Vec3d playerPos = PosHelper.getPos(client.player);
+            if (playerPos.distanceTo(Vec3d.ofCenter(currentTail)) <= INTERACT_RANGE) {
+                state = State.ROTATING_TO_TAIL;
+                rotateTicks = 0;
+            } else {
+                state = State.PATHFINDING;
+                navigator.setTarget(Vec3d.ofCenter(currentTail));
+            }
+            ChatUtils.sendActionBar("\u00a7a[SnakeFarm] Found snake! (" + targetSnake.length() + " blocks)");
         } else {
             scanCooldown = SCAN_INTERVAL;
         }
     }
 
     // ========================
-    // State: PATHFINDING
+    // PATHFINDING
     // ========================
     private void tickPathfinding(MinecraftClient client) {
-        if (targetSnake == null) {
-            state = State.SCANNING;
-            navigator.stop();
+        if (targetSnake == null || !isSnakeStillValid(client)) {
+            resetAndRescan("Snake lost");
             return;
         }
 
-        // Check if the head block is still there
-        if (!client.world.getBlockState(targetSnake.head).isOf(net.minecraft.block.Blocks.LAPIS_BLOCK)) {
-            ChatUtils.sendActionBar("\u00a7e[SnakeFarm] Snake moved. Rescanning...");
-            state = State.SCANNING;
-            navigator.stop();
-            return;
+        // Re-trace to get updated tail position (snake may move)
+        SnakeDetector.Snake updated = retraceSnake(client);
+        if (updated != null) {
+            targetSnake = updated;
+            currentTail = targetSnake.getTail();
+            navigator.setTarget(Vec3d.ofCenter(currentTail));
         }
 
-        // Update nav target to the snake head
-        navigator.setTarget(targetSnake.getCenterPos());
         boolean arrived = navigator.tick(client);
-
-        // Check if we're close enough to interact
         Vec3d playerPos = PosHelper.getPos(client.player);
-        double distToHead = playerPos.distanceTo(Vec3d.ofCenter(targetSnake.head));
+        double distToTail = playerPos.distanceTo(Vec3d.ofCenter(currentTail));
 
-        if (arrived || distToHead <= INTERACT_RANGE) {
+        if (arrived || distToTail <= INTERACT_RANGE) {
             navigator.stop();
-            state = State.STUNNING;
-            ChatUtils.sendActionBar("\u00a7a[SnakeFarm] In range! Stunning head...");
+            controller.resetRotation();
+            state = State.ROTATING_TO_TAIL;
+            rotateTicks = 0;
+            ChatUtils.sendActionBar("\u00a7a[SnakeFarm] In range! Preparing to stun...");
         }
 
         if (navigator.isStuck()) {
-            ChatUtils.sendActionBar("\u00a7c[SnakeFarm] Stuck! Finding new target...");
-            navigator.stop();
-            targetSnake = null;
-            state = State.SCANNING;
+            resetAndRescan("Stuck! Finding new target");
         }
     }
 
     // ========================
-    // State: STUNNING (hit the lapis head block)
+    // ROTATING_TO_TAIL (smooth look at tail before stunning)
     // ========================
-    private void tickStunning(MinecraftClient client) {
-        if (targetSnake == null) {
-            state = State.SCANNING;
+    private void tickRotatingToTail(MinecraftClient client) {
+        if (targetSnake == null || !isSnakeStillValid(client)) {
+            resetAndRescan("Snake lost");
             return;
         }
 
-        // Check head still exists
-        if (!client.world.getBlockState(targetSnake.head).isOf(net.minecraft.block.Blocks.LAPIS_BLOCK)) {
-            // Head gone — snake might be dead or moved, rescan
+        rotateTicks++;
+
+        // Smoothly rotate to look at the tail
+        boolean aimed = controller.smoothLookAtBlock(client.player, currentTail);
+
+        if (aimed || rotateTicks > MAX_ROTATE_TICKS) {
+            // Switch to stun item (slot 2)
+            controller.switchSlot(client, STUN_SLOT);
+            state = State.STUNNING;
+            stunTicks = 0;
+            // Randomize stun duration slightly for human-like behavior
+            stunHoldTarget = STUN_HOLD_TICKS + (int)(Math.random() * 4) - 2;
+        }
+    }
+
+    // ========================
+    // STUNNING (right-click hold with slot 2 on tail)
+    // ========================
+    private void tickStunning(MinecraftClient client) {
+        if (targetSnake == null || !isSnakeStillValid(client)) {
+            resetAndRescan("Snake lost during stun");
+            return;
+        }
+
+        // Keep looking at tail smoothly
+        controller.smoothLookAtBlock(client.player, currentTail);
+
+        // Right-click the tail block each tick to hold the interaction
+        controller.rightClickBlock(client, currentTail);
+        stunTicks++;
+
+        ChatUtils.sendActionBar("\u00a7b[SnakeFarm] Stunning... (" + stunTicks + "/" + stunHoldTarget + ")");
+
+        if (stunTicks >= stunHoldTarget) {
+            // Stun complete, switch to mining
+            state = State.SWITCHING_TO_MINE;
+            switchTicks = 0;
+        }
+    }
+
+    // ========================
+    // SWITCHING_TO_MINE (brief delay after slot switch)
+    // ========================
+    private void tickSwitchingToMine(MinecraftClient client) {
+        if (switchTicks == 0) {
+            controller.switchSlot(client, MINE_SLOT);
+        }
+        switchTicks++;
+
+        // Keep aiming at tail during switch
+        controller.smoothLookAtBlock(client.player, currentTail);
+
+        // Small human-like delay
+        int delay = SLOT_SWITCH_DELAY + (int)(Math.random() * 2);
+        if (switchTicks >= delay) {
+            state = State.MINING;
+            mineTicks = 0;
+        }
+    }
+
+    // ========================
+    // MINING (left-click hold on tail block with slot 1)
+    // ========================
+    private void tickMining(MinecraftClient client) {
+        if (targetSnake == null) {
+            controller.stopMining(client);
             snakeCleared();
             return;
         }
 
-        // Check range to head
-        Vec3d playerPos = PosHelper.getPos(client.player);
-        if (playerPos.distanceTo(Vec3d.ofCenter(targetSnake.head)) > INTERACT_RANGE) {
-            state = State.PATHFINDING;
-            navigator.setTarget(targetSnake.getCenterPos());
-            return;
-        }
-
-        // Hit the head block to stun the snake
-        controller.lookAtBlock(client.player, targetSnake.head);
-        controller.attackBlock(client, targetSnake.head);
-        ChatUtils.sendActionBar("\u00a7b[SnakeFarm] Stunned! Mining tail...");
-
-        // Wait briefly then mine
-        state = State.WAITING;
-        waitTicks = STUN_DURATION;
-    }
-
-    // ========================
-    // State: WAITING
-    // ========================
-    private void tickWaiting(MinecraftClient client) {
-        waitTicks--;
-        if (waitTicks <= 0) {
-            if (targetSnake != null) {
-                // Re-trace the snake body to find current tail
-                targetSnake = retrace(client);
-                if (targetSnake != null && !targetSnake.body.isEmpty()) {
-                    targetMineBlock = targetSnake.getTail();
-                    mineTicks = 0;
-                    state = State.MINING;
-                } else if (targetSnake != null) {
-                    // No body left, try mining the head itself
-                    targetMineBlock = targetSnake.head;
-                    mineTicks = 0;
-                    state = State.MINING;
-                } else {
-                    snakeCleared();
-                }
-            } else {
-                snakeCleared();
-            }
-        }
-    }
-
-    // ========================
-    // State: MINING (break the tail block)
-    // ========================
-    private void tickMining(MinecraftClient client) {
-        if (targetMineBlock == null) {
-            state = State.STUNNING;
+        if (currentTail == null) {
+            controller.stopMining(client);
+            state = State.SCANNING;
             return;
         }
 
         mineTicks++;
 
-        // Check if block is already gone
-        if (client.world.getBlockState(targetMineBlock).isAir()) {
+        // Check if block already broken
+        if (client.world.getBlockState(currentTail).isAir()) {
             blocksMined++;
             controller.stopMining(client);
-            ChatUtils.sendActionBar("\u00a7a[SnakeFarm] Block mined! (" + blocksMined + " total)");
+            ChatUtils.sendActionBar("\u00a7a[SnakeFarm] Mined! (" + blocksMined + " blocks total)");
 
-            targetMineBlock = null;
-            mineTicks = 0;
-
-            // Check if snake still has blocks left
-            targetSnake = retrace(client);
+            // Re-trace to find next tail
+            targetSnake = retraceSnake(client);
             if (targetSnake == null) {
                 snakeCleared();
-            } else {
-                // Stun again before mining next block
-                state = State.STUNNING;
+                return;
             }
+
+            currentTail = targetSnake.getTail();
+            controller.resetRotation();
+
+            // Switch back to stun item for next block
+            state = State.SWITCHING_TO_STUN;
+            switchTicks = 0;
             return;
         }
 
-        // Check range
-        Vec3d playerPos = PosHelper.getPos(client.player);
-        if (playerPos.distanceTo(Vec3d.ofCenter(targetMineBlock)) > INTERACT_RANGE) {
-            controller.stopMining(client);
-            navigator.setTarget(Vec3d.ofCenter(targetMineBlock));
-            state = State.PATHFINDING;
-            return;
-        }
+        // Keep smoothly aiming at the tail while mining
+        controller.smoothLookAtBlock(client.player, currentTail);
 
         // Mine the block
-        boolean broken = controller.mineBlock(client, targetMineBlock);
+        boolean broken = controller.mineBlock(client, currentTail);
         if (broken) {
             blocksMined++;
-            ChatUtils.sendActionBar("\u00a7a[SnakeFarm] Block mined! (" + blocksMined + " total)");
-            mineTicks = 0;
-            targetMineBlock = null;
+            ChatUtils.sendActionBar("\u00a7a[SnakeFarm] Mined! (" + blocksMined + " blocks total)");
 
-            targetSnake = retrace(client);
+            targetSnake = retraceSnake(client);
             if (targetSnake == null) {
                 snakeCleared();
-            } else {
-                state = State.STUNNING;
+                return;
             }
+
+            currentTail = targetSnake.getTail();
+            controller.resetRotation();
+            state = State.SWITCHING_TO_STUN;
+            switchTicks = 0;
         }
 
-        // If mining takes too long, re-stun
+        // Re-stun if mining takes too long
         if (mineTicks > MAX_MINE_TICKS) {
             controller.stopMining(client);
             mineTicks = 0;
-            state = State.STUNNING;
-            ChatUtils.sendActionBar("\u00a7e[SnakeFarm] Stun expired. Re-stunning...");
+            controller.resetRotation();
+            state = State.ROTATING_TO_TAIL;
+            rotateTicks = 0;
+            ChatUtils.sendActionBar("\u00a7e[SnakeFarm] Stun wore off. Re-stunning...");
+        }
+    }
+
+    // ========================
+    // SWITCHING_TO_STUN (switch back to slot 2 for next stun)
+    // ========================
+    private void tickSwitchingToStun(MinecraftClient client) {
+        if (switchTicks == 0) {
+            controller.switchSlot(client, STUN_SLOT);
+        }
+        switchTicks++;
+
+        // Small delay + start rotating to new tail
+        controller.smoothLookAtBlock(client.player, currentTail);
+
+        int delay = SLOT_SWITCH_DELAY + (int)(Math.random() * 2);
+        if (switchTicks >= delay) {
+            state = State.ROTATING_TO_TAIL;
+            rotateTicks = 0;
         }
     }
 
@@ -288,36 +333,59 @@ public class SnakeFarmMacro {
     // Helpers
     // ========================
 
-    /**
-     * Re-traces the snake from its head to get updated body positions.
-     * Returns null if the head is gone (snake fully mined).
-     */
-    private SnakeDetector.Snake retrace(MinecraftClient client) {
-        if (targetSnake == null) return null;
-        if (!client.world.getBlockState(targetSnake.head).isOf(net.minecraft.block.Blocks.LAPIS_BLOCK)) {
-            return null; // Head is gone
-        }
-        // Re-find snakes near the head position
-        return SnakeDetector.findNearestSnake(client).orElse(null);
+    private boolean isSnakeStillValid(MinecraftClient client) {
+        if (targetSnake == null) return false;
+        // Check if head (lapis) still exists
+        return client.world.getBlockState(targetSnake.head).isOf(Blocks.LAPIS_BLOCK);
     }
 
-    private void snakeCleared() {
-        snakesKilled++;
-        ChatUtils.send("\u00a7a[SnakeFarm] Snake cleared! Total: " + snakesKilled + " snakes, " + blocksMined + " blocks");
+    private SnakeDetector.Snake retraceSnake(MinecraftClient client) {
+        if (targetSnake == null) return null;
+        // Check if head still there
+        if (!client.world.getBlockState(targetSnake.head).isOf(Blocks.LAPIS_BLOCK)) {
+            return null;
+        }
+        // Re-scan from scratch near the head
+        Vec3d headPos = Vec3d.ofCenter(targetSnake.head);
+        return SnakeDetector.findSnakes(client).stream()
+                .filter(s -> Vec3d.ofCenter(s.head).distanceTo(headPos) < 2.0)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private void resetAndRescan(String reason) {
+        ChatUtils.sendActionBar("\u00a7e[SnakeFarm] " + reason + ". Rescanning...");
+        navigator.stop();
+        MinecraftClient client = MinecraftClient.getInstance();
+        controller.stopMining(client);
+        controller.resetRotation();
         targetSnake = null;
-        targetMineBlock = null;
-        mineTicks = 0;
+        currentTail = null;
         state = State.SCANNING;
         scanCooldown = 10;
     }
 
+    private void snakeCleared() {
+        snakesKilled++;
+        ChatUtils.send("\u00a7a[SnakeFarm] Snake cleared! (" + snakesKilled + " snakes, " + blocksMined + " blocks)");
+        targetSnake = null;
+        currentTail = null;
+        mineTicks = 0;
+        controller.resetRotation();
+        state = State.SCANNING;
+        scanCooldown = 5 + (int)(Math.random() * 10); // Random pause before next snake
+    }
+
     private void resetState() {
         targetSnake = null;
-        targetMineBlock = null;
+        currentTail = null;
         tickCounter = 0;
         scanCooldown = 0;
-        waitTicks = 0;
+        stunTicks = 0;
+        switchTicks = 0;
         mineTicks = 0;
+        rotateTicks = 0;
+        controller.resetRotation();
     }
 
     public void stop() {
@@ -326,11 +394,12 @@ public class SnakeFarmMacro {
         navigator.stop();
         MinecraftClient client = MinecraftClient.getInstance();
         controller.stopMining(client);
+        controller.resetRotation();
         resetState();
     }
 
     // ========================
-    // HUD Rendering
+    // HUD
     // ========================
     public void renderHud(DrawContext context) {
         if (!running) return;
@@ -342,7 +411,7 @@ public class SnakeFarmMacro {
         int y = 4;
         int color = 0xFFFFFF;
 
-        context.fill(x - 2, y - 2, x + 150, y + 52, 0x80000000);
+        context.fill(x - 2, y - 2, x + 160, y + 62, 0x80000000);
 
         context.drawText(client.textRenderer, "\u00a7b\u00a7l[SnakeFarm]", x, y, color, true);
         y += 12;
@@ -350,13 +419,18 @@ public class SnakeFarmMacro {
         String stateColor = switch (state) {
             case SCANNING -> "\u00a7e";
             case PATHFINDING -> "\u00a76";
+            case ROTATING_TO_TAIL, SWITCHING_TO_STUN, SWITCHING_TO_MINE -> "\u00a7d";
             case STUNNING -> "\u00a7c";
             case MINING -> "\u00a7a";
-            case WAITING -> "\u00a77";
             default -> "\u00a7f";
         };
         context.drawText(client.textRenderer, stateColor + state.display, x, y, color, true);
         y += 12;
+
+        if (targetSnake != null) {
+            context.drawText(client.textRenderer, "\u00a77Snake: \u00a7f" + targetSnake.length() + " blocks left", x, y, color, true);
+            y += 10;
+        }
 
         context.drawText(client.textRenderer, "\u00a77Snakes: \u00a7f" + snakesKilled, x, y, color, true);
         y += 10;
