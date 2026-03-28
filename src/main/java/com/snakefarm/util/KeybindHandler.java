@@ -15,7 +15,7 @@ public class KeybindHandler {
                 "key.snakefarm.toggle",
                 InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_RIGHT_SHIFT,
-                "key.categories.misc"
+                KeyBinding.Category.MISC
         ));
     }
 
