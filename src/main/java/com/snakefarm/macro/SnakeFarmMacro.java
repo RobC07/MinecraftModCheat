@@ -2,6 +2,7 @@ package com.snakefarm.macro;
 
 import com.snakefarm.SnakeFarmMod;
 import com.snakefarm.util.ChatUtils;
+import com.snakefarm.util.PosHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.entity.decoration.ArmorStandEntity;
@@ -118,7 +119,7 @@ public class SnakeFarmMacro {
             state = State.PATHFINDING;
             navigator.setTarget(targetSnake);
             ChatUtils.sendActionBar("\u00a7a[SnakeFarm] Found snake! Moving to it...");
-            SnakeFarmMod.LOGGER.info("[SnakeFarm] Snake found at {}", targetSnake.getPos());
+            SnakeFarmMod.LOGGER.info("[SnakeFarm] Snake found at {}", PosHelper.getPos(targetSnake));
         } else {
             // No snake found, wait and try again
             scanCooldown = SCAN_INTERVAL;
