@@ -1,124 +1,168 @@
 package com.snakefarm.macro;
 
-import com.snakefarm.util.PosHelper;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.world.ClientWorld;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.decoration.ArmorStandEntity;
-import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
+/**
+ * Detects snakes in the Living Cave.
+ *
+ * Snakes are made of blocks on walls/floors:
+ * - Head: Lapis Lazuli block
+ * - Body/Tail: Blue Stained Glass blocks in a chain
+ *
+ * The macro needs to stun the head, then mine the tail (last glass block).
+ */
 public class SnakeDetector {
-    private static final double SCAN_RADIUS = 30.0;
+    private static final double SCAN_RADIUS = 20.0;
 
-    public static List<ArmorStandEntity> findSnakeEntities(MinecraftClient client) {
-        List<ArmorStandEntity> snakes = new ArrayList<>();
+    /**
+     * Represents a detected snake made of blocks.
+     */
+    public static class Snake {
+        public final BlockPos head;           // Lapis lazuli block
+        public final List<BlockPos> body;     // Blue stained glass chain (ordered head->tail)
+
+        public Snake(BlockPos head, List<BlockPos> body) {
+            this.head = head;
+            this.body = body;
+        }
+
+        /** Gets the last body segment (the tail to mine). */
+        public BlockPos getTail() {
+            if (body.isEmpty()) return head;
+            return body.get(body.size() - 1);
+        }
+
+        /** Gets the center position for pathfinding. */
+        public Vec3d getCenterPos() {
+            return Vec3d.ofCenter(head);
+        }
+
+        public int length() {
+            return 1 + body.size(); // head + body segments
+        }
+    }
+
+    /**
+     * Scans for all snakes within range of the player.
+     */
+    public static List<Snake> findSnakes(MinecraftClient client) {
+        List<Snake> snakes = new ArrayList<>();
         if (client.world == null || client.player == null) return snakes;
 
         ClientWorld world = client.world;
-        Vec3d playerPos = PosHelper.getPos(client.player);
+        BlockPos playerPos = client.player.getBlockPos();
+        int radius = (int) SCAN_RADIUS;
 
-        Box scanBox = new Box(
-                playerPos.x - SCAN_RADIUS, playerPos.y - SCAN_RADIUS, playerPos.z - SCAN_RADIUS,
-                playerPos.x + SCAN_RADIUS, playerPos.y + SCAN_RADIUS, playerPos.z + SCAN_RADIUS
-        );
+        // Track which lapis blocks we've already assigned to a snake
+        Set<BlockPos> visitedHeads = new HashSet<>();
 
-        for (Entity entity : world.getEntities()) {
-            if (!(entity instanceof ArmorStandEntity armorStand)) continue;
-            if (!entity.isAlive()) continue;
-            if (!scanBox.contains(PosHelper.getPos(entity))) continue;
+        // Scan for lapis lazuli blocks (snake heads)
+        for (int x = -radius; x <= radius; x++) {
+            for (int y = -radius; y <= radius; y++) {
+                for (int z = -radius; z <= radius; z++) {
+                    BlockPos pos = playerPos.add(x, y, z);
+                    if (visitedHeads.contains(pos)) continue;
 
-            if (isSnakeEntity(armorStand)) {
-                snakes.add(armorStand);
+                    BlockState state = world.getBlockState(pos);
+                    if (isSnakeHead(state)) {
+                        // Found a head — trace the body
+                        List<BlockPos> body = traceSnakeBody(world, pos);
+                        if (!body.isEmpty()) {
+                            snakes.add(new Snake(pos, body));
+                            visitedHeads.add(pos);
+                        }
+                    }
+                }
             }
         }
 
         return snakes;
     }
 
-    public static Optional<ArmorStandEntity> findNearestSnake(MinecraftClient client) {
+    /**
+     * Finds the nearest snake to the player.
+     */
+    public static Optional<Snake> findNearestSnake(MinecraftClient client) {
         if (client.player == null) return Optional.empty();
-        Vec3d playerPos = PosHelper.getPos(client.player);
+        Vec3d playerPos = new Vec3d(client.player.getX(), client.player.getY(), client.player.getZ());
 
-        return findSnakeEntities(client).stream()
-                .min(Comparator.comparingDouble(e -> e.squaredDistanceTo(playerPos.x, playerPos.y, playerPos.z)));
+        return findSnakes(client).stream()
+                .min(Comparator.comparingDouble(s -> playerPos.squaredDistanceTo(s.getCenterPos())));
     }
 
-    public static List<ArmorStandEntity> findSnakeSegments(MinecraftClient client, ArmorStandEntity headOrAny) {
-        List<ArmorStandEntity> segments = new ArrayList<>();
-        if (client.world == null) return segments;
+    /**
+     * Traces the snake body from the head, following connected blue stained glass blocks.
+     */
+    private static List<BlockPos> traceSnakeBody(ClientWorld world, BlockPos head) {
+        List<BlockPos> body = new ArrayList<>();
+        Set<BlockPos> visited = new HashSet<>();
+        visited.add(head);
 
-        Vec3d snakePos = PosHelper.getPos(headOrAny);
-        double segmentRadius = 8.0;
-        Box segmentBox = new Box(
-                snakePos.x - segmentRadius, snakePos.y - segmentRadius, snakePos.z - segmentRadius,
-                snakePos.x + segmentRadius, snakePos.y + segmentRadius, snakePos.z + segmentRadius
-        );
+        BlockPos current = head;
 
-        for (Entity entity : client.world.getEntities()) {
-            if (!(entity instanceof ArmorStandEntity armorStand)) continue;
-            if (!entity.isAlive()) continue;
-            if (!segmentBox.contains(PosHelper.getPos(entity))) continue;
-            if (isSnakeEntity(armorStand)) {
-                segments.add(armorStand);
-            }
+        // Follow the chain of blue glass blocks
+        while (true) {
+            BlockPos next = findNextBodySegment(world, current, visited);
+            if (next == null) break;
+
+            body.add(next);
+            visited.add(next);
+            current = next;
+
+            // Safety limit
+            if (body.size() > 50) break;
         }
 
-        if (client.player != null) {
-            Vec3d playerPos = PosHelper.getPos(client.player);
-            segments.sort(Comparator.comparingDouble(
-                    e -> e.squaredDistanceTo(playerPos.x, playerPos.y, playerPos.z)));
-        }
-
-        return segments;
+        return body;
     }
 
-    private static boolean isSnakeEntity(ArmorStandEntity armorStand) {
-        if (armorStand.hasCustomName()) {
-            Text name = armorStand.getCustomName();
-            if (name != null) {
-                String nameStr = name.getString().toLowerCase();
-                if (nameStr.contains("snake")) return true;
-                if (nameStr.contains("serpent")) return true;
-                if (nameStr.contains("slitherer")) return true;
-            }
-        }
-
-        if (armorStand.isInvisible() && armorStand.isMarker()) {
-            return false;
-        }
-
-        return false;
-    }
-
-    public static Optional<BlockPos> findMineableSnakeBlock(MinecraftClient client, ArmorStandEntity segment) {
-        if (client.world == null) return Optional.empty();
-
-        BlockPos entityBlock = segment.getBlockPos();
-
-        BlockPos[] candidates = {
-                entityBlock,
-                entityBlock.down(),
-                entityBlock.up(),
-                entityBlock.north(),
-                entityBlock.south(),
-                entityBlock.east(),
-                entityBlock.west()
+    /**
+     * Finds the next connected blue stained glass block adjacent to the current position.
+     * Checks all 6 directions (up, down, north, south, east, west).
+     */
+    private static BlockPos findNextBodySegment(ClientWorld world, BlockPos current, Set<BlockPos> visited) {
+        BlockPos[] neighbors = {
+                current.north(), current.south(),
+                current.east(), current.west(),
+                current.up(), current.down()
         };
 
-        for (BlockPos pos : candidates) {
-            if (!client.world.getBlockState(pos).isAir()) {
-                return Optional.of(pos);
+        for (BlockPos neighbor : neighbors) {
+            if (visited.contains(neighbor)) continue;
+            BlockState state = world.getBlockState(neighbor);
+            if (isSnakeBody(state)) {
+                return neighbor;
             }
         }
 
-        return Optional.empty();
+        return null;
+    }
+
+    /**
+     * Checks if a block is a snake head (lapis lazuli block).
+     */
+    private static boolean isSnakeHead(BlockState state) {
+        return state.isOf(Blocks.LAPIS_BLOCK);
+    }
+
+    /**
+     * Checks if a block is a snake body segment (blue stained glass).
+     */
+    private static boolean isSnakeBody(BlockState state) {
+        return state.isOf(Blocks.BLUE_STAINED_GLASS);
+    }
+
+    /**
+     * Checks if a block is any part of a snake.
+     */
+    public static boolean isSnakeBlock(BlockState state) {
+        return isSnakeHead(state) || isSnakeBody(state);
     }
 }
