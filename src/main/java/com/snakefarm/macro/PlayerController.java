@@ -70,6 +70,18 @@ public class PlayerController {
         isMining = false;
     }
 
+    /**
+     * Hits a block (left-click) to stun the snake head.
+     */
+    public void attackBlock(MinecraftClient client, BlockPos pos) {
+        if (client.player == null || client.interactionManager == null) return;
+
+        lookAtBlock(client.player, pos);
+        Direction face = getClosestFace(client.player, pos);
+        client.interactionManager.attackBlock(pos, face);
+        client.player.swingHand(Hand.MAIN_HAND);
+    }
+
     public boolean isMining() {
         return isMining;
     }
