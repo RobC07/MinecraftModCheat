@@ -27,7 +27,7 @@ public class PlayerController {
      */
     public void switchSlot(MinecraftClient client, int slot) {
         if (client.player == null) return;
-        client.player.getInventory().selectedSlot = slot;
+        client.player.getInventory().setSelectedSlot(slot);
     }
 
     /**
