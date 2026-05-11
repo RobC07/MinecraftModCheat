@@ -1,0 +1,92 @@
+[
+  {
+    "id": "fusion_a_plus_b",
+    "outputShard": "SHARD_PLACEHOLDER_C",
+    "outputQty": 1,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_A", "qty": 2 },
+      { "shardId": "SHARD_PLACEHOLDER_B", "qty": 2 }
+    ]
+  },
+  {
+    "id": "fusion_a_plus_d",
+    "outputShard": "SHARD_PLACEHOLDER_E",
+    "outputQty": 1,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_A", "qty": 4 },
+      { "shardId": "SHARD_PLACEHOLDER_D", "qty": 1 }
+    ]
+  },
+  {
+    "id": "fusion_b_plus_d",
+    "outputShard": "SHARD_PLACEHOLDER_F",
+    "outputQty": 2,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_B", "qty": 3 },
+      { "shardId": "SHARD_PLACEHOLDER_D", "qty": 3 }
+    ]
+  },
+  {
+    "id": "fusion_c_plus_e",
+    "outputShard": "SHARD_PLACEHOLDER_G",
+    "outputQty": 1,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_C", "qty": 1 },
+      { "shardId": "SHARD_PLACEHOLDER_E", "qty": 1 }
+    ]
+  },
+  {
+    "id": "fusion_solo_a",
+    "outputShard": "SHARD_PLACEHOLDER_H",
+    "outputQty": 1,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_A", "qty": 8 }
+    ]
+  },
+  {
+    "id": "fusion_f_plus_g",
+    "outputShard": "SHARD_PLACEHOLDER_I",
+    "outputQty": 1,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_F", "qty": 2 },
+      { "shardId": "SHARD_PLACEHOLDER_G", "qty": 2 }
+    ]
+  },
+  {
+    "id": "fusion_d_plus_h",
+    "outputShard": "SHARD_PLACEHOLDER_J",
+    "outputQty": 3,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_D", "qty": 2 },
+      { "shardId": "SHARD_PLACEHOLDER_H", "qty": 1 }
+    ]
+  },
+  {
+    "id": "fusion_b_plus_e",
+    "outputShard": "SHARD_PLACEHOLDER_K",
+    "outputQty": 1,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_B", "qty": 5 },
+      { "shardId": "SHARD_PLACEHOLDER_E", "qty": 2 }
+    ]
+  },
+  {
+    "id": "fusion_a_plus_b_plus_d",
+    "outputShard": "SHARD_PLACEHOLDER_L",
+    "outputQty": 1,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_A", "qty": 1 },
+      { "shardId": "SHARD_PLACEHOLDER_B", "qty": 1 },
+      { "shardId": "SHARD_PLACEHOLDER_D", "qty": 1 }
+    ]
+  },
+  {
+    "id": "fusion_i_plus_j",
+    "outputShard": "SHARD_PLACEHOLDER_M",
+    "outputQty": 1,
+    "inputs": [
+      { "shardId": "SHARD_PLACEHOLDER_I", "qty": 2 },
+      { "shardId": "SHARD_PLACEHOLDER_J", "qty": 2 }
+    ]
+  }
+]
